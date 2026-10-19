@@ -10,9 +10,7 @@ Détails des choix, de l'avancement et des prochaines étapes : [PROJET.md](PROJ
 pip install -r requirements.txt
 ```
 
-Les modèles 3D ne sont pas versionnés (taille et licence Sketchfab). Placer dans `Assets/models/` :
-- `DJI_Avata2_Sketchfab.glb` (drone)
-- `Nickel_factory.glb` (usine, optionnel)
+Le modèle du drone (`Assets/models/DJI_Avata2_Sketchfab.glb`, DJI Avata 2 issu de Sketchfab) est inclus dans le dépôt.
 
 ## Lancer
 
@@ -31,7 +29,7 @@ python scene.py
 | Échap | libérer la souris, puis quitter |
 | Tab | caméra de suivi |
 
-Le panneau de gauche permet de choisir les vues (caméra gauche, caméra droite, caméra fixe, suivi), de régler le vol et de changer de bâtiment.
+Le panneau de gauche permet de choisir les vues (caméra gauche, caméra droite, caméra fixe, suivi), de régler le vol et d'afficher ou non le bâtiment procédural.
 
 ## Fichiers
 

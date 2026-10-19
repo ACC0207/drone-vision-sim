@@ -29,7 +29,7 @@ Hors vision : la génération d'obstacles et le moteur physique ne sont pas le c
 
 ## Ce qui est fait
 
-- Scène moderngl : **sol quadrillé par défaut avec toggle**, **bâtiment industriel procédural (`building.py`) avec vol intérieur et 25 ouvertures**, usine externe GLB en option, sphère et mur de test percé.
+- Scène moderngl : **sol quadrillé par défaut avec toggle**, **bâtiment industriel procédural (`building.py`) avec vol intérieur et 25 ouvertures**, sphère et mur de test percé.
 - **Bâtiment industriel procédural (`building.py`)** :
   - Décomposition exacte en 90 boîtes solides (`Box` de collision SAT) : **aucun obstacle invisible, le drone peut voler à l'intérieur en toute fluidité**.
   - Deux étages : grand hall hangar (hauteur 5.8 m), atelier/laboratoire adjacent, étage mezzanine (Y = 3.1 m), toiture industrielle.
@@ -49,7 +49,7 @@ Hors vision : la génération d'obstacles et le moteur physique ne sont pas le c
 - **Modèle 3D du drone** DJI Avata 2 chargé depuis le GLB, à l'échelle réelle (21 × 6 × 18 cm).
 - **Modèle de vol réaliste** : inertie, accélération limitée, inclinaisons dynamiques en tangage et roulis (*tilt / banked turn*), compatible pilotage clavier et manette (support GLFW gamepad avec détection automatique).
 - **Deux caméras** sur la face avant du drone, parallèles (paire déjà rectifiée), fovy 60°, inclinables.
-- **Panneau latéral** (Dear ImGui) : choix des vues, bascule manette, sliders de réglage en direct (vitesse max en m/s et km/h, sensibilité lacet et caméra), sélecteur de bâtiment (Procédural / Usine GLB / Aucun), **boutons de téléportation rapide** (Portail hangar, Grand hall, Mezzanine, Atelier, Toit), option de quadrillage du sol, télémétrie complète.
+- **Panneau latéral** (Dear ImGui) : choix des vues, bascule manette, sliders de réglage en direct (vitesse max en m/s et km/h, sensibilité lacet et caméra), sélecteur de bâtiment (Procédural / Aucun), **boutons de téléportation rapide** (Portail hangar, Grand hall, Mezzanine, Atelier, Toit), option de quadrillage du sol, télémétrie complète.
 - Slides des cours 1 à 4 récupérées depuis Moodle (`Docs/Slides`).
 - Analyse de l'approche vision : `Docs/Approche_vision_drone.md`.
 
@@ -74,11 +74,10 @@ Projet/
 ├── ui_panel.py             panneau latéral ImGui (choix des vues, réglages vol, téléportation, infos)
 ├── requirements.txt        moderngl, glfw, numpy, pillow, imgui-bundle
 ├── Assets/
-│   ├── models/             DJI_Avata2_Sketchfab.glb, Nickel_factory.glb
-│   ├── source/             DJI_Avata2_Sketchfab.zip, Nickel_factory.fbx
+│   ├── models/             DJI_Avata2_Sketchfab.glb (seul asset versionné)
+│   ├── source/             DJI_Avata2_Sketchfab.zip (local, non versionné)
 │   └── textures/
-│       ├── drone/          textures du modèle de drone
-│       └── factory/        textures haute résolution 8K et optimisées 2K de l'usine
+│       └── drone/          textures du modèle de drone (local, non versionné)
 └── Docs/
     ├── Approche_vision_drone.md   approche vision détaillée
     └── Slides/             PDF des cours 1 à 4

@@ -34,7 +34,6 @@ from ui_panel import PANEL_WIDTH, SidePanel
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DRONE_MODEL = os.path.join(HERE, "Assets", "models", "DJI_Avata2_Sketchfab.glb")
-FACTORY_MODEL = os.path.join(HERE, "Assets", "models", "Nickel_factory.glb")
 
 STEREO_BASELINE = 0.18     # distance entre les deux caméras (m)
 CAMERA_FOVY = 60.0         # champ vertical des caméras du drone (degrés)
@@ -279,18 +278,12 @@ class Scene:
         # Bâtiment industriel procédural (vol intérieur + shader architectural)
         self.procedural_building = ProceduralBuilding(self.ctx, origin=(0.0, 0.0, -12.0))
 
-        # Modèle 3D de l'usine Nickel Factory (texturé et à l'échelle) en option
-        self.factory_objects = []
-        self.factory_colliders = []
-        if os.path.exists(FACTORY_MODEL):
-            self.load_factory(FACTORY_MODEL, position=(0.0, -0.32, -12.0))
-
         # Sphère et mur de test conservés dans la scène
         v, i = make_sphere(1.0)
         self.add(v, i, translation(14.0, 1.0, -5.0), (0.85, 0.25, 0.2), collider=Sphere((14.0, 1.0, -5.0), 1.0))
         self.add_wall_with_hole(z=-28.0)
 
-        # Mode actif : 0 = procédural, 1 = usine GLB, 2 = aucun
+        # Mode actif : 0 = procédural, 2 = aucun
         self.building_mode = 0
 
     @property
@@ -298,8 +291,6 @@ class Scene:
         """Collisionneurs dynamiques selon le modèle de bâtiment actif."""
         if self.building_mode == 0 and self.procedural_building is not None:
             return [*self.base_colliders, *self.procedural_building.colliders]
-        elif self.building_mode == 1:
-            return [*self.base_colliders, *self.factory_colliders]
         else:
             return self.base_colliders
 
@@ -326,19 +317,6 @@ class Scene:
         if collider is not None:
             self.base_colliders.append(collider)
 
-    def load_factory(self, path, position=(0.0, -0.32, -12.0)):
-        """Charge l'usine GLB texturée et son collisionneur boîte englobante."""
-        parts = load_glb(path)
-        m = translation(*position)
-        for v, i, color, tex_img in parts:
-            tex = self.make_texture(tex_img)
-            vao = self.make_vao(v, i)
-            self.factory_objects.append((vao, m, color, False, tex))
-        lo, hi = bounds(parts)
-        center = np.array(position, dtype="f8") + (lo + hi) / 2.0
-        half = (hi - lo) / 2.0
-        self.factory_colliders.append(Box(center, half))
-
     def add_box(self, center, half, color):
         v, i = make_box(half)
         self.add(v, i, translation(*center), color, collider=Box(center, half))
@@ -364,16 +342,13 @@ class Scene:
         if self.building_mode == 0 and self.procedural_building is not None:
             self.procedural_building.render(camera, aspect, light_dir=(-0.4, -1.0, -0.3))
 
-        # 2. Rendu des objets standard (sol, sphère, drone, usine GLB si activée)
+        # 2. Rendu des objets standard (sol, sphère, drone)
         self.prog["u_proj"].write(camera.projection(aspect).T.copy().tobytes())
         self.prog["u_view"].write(camera.view().T.copy().tobytes())
         self.prog["u_light_dir"].value = (-0.4, -1.0, -0.3)
         self.prog["u_eye"].value = tuple(camera.position)
 
-        items_to_render = [*self.objects]
-        if self.building_mode == 1:
-            items_to_render.extend(self.factory_objects)
-        items_to_render.extend(extra)
+        items_to_render = [*self.objects, *extra]
 
         for item in items_to_render:
             vao, model, color, grid = item[:4]
@@ -676,7 +651,7 @@ def main():
         "gamepad_connected": False,
         "gamepad_name": "",
         "show_grid": True,         # sol requadrillé par défaut
-        "building_mode": 0,        # 0: Procédural (vol intérieur), 1: Usine GLB, 2: Aucun
+        "building_mode": 0,        # 0: Procédural (vol intérieur), 2: Aucun
         "teleport": None,          # tuple (pos, yaw) si téléportation demandée
     }
 

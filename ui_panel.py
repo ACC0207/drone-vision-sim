@@ -111,8 +111,6 @@ class SidePanel:
             mode = settings.get("building_mode", 0)
             if imgui.radio_button("Procédural (vol intérieur)", mode == 0):
                 settings["building_mode"] = 0
-            if imgui.radio_button("Usine externe GLB", mode == 1):
-                settings["building_mode"] = 1
             if imgui.radio_button("Sans bâtiment", mode == 2):
                 settings["building_mode"] = 2
 
