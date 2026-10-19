@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ImGui
+imgui.ini
+
+# PDF du cours (ne pas republier)
+Docs/Slides/
+
+# Modèles et textures 3D : volumineux (> 100 Mo pour certains) et sous licence Sketchfab
+Assets/
