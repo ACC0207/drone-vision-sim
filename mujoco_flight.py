@@ -4,8 +4,7 @@
 - Scène de collision générée à partir des collisionneurs du simulateur (Box, Sphere, VerticalCylinder,
   Ground), sans aucun visuel ; reconstruite quand l'environnement change.
 - Contrôleur en cascade : vitesse voulue -> poussée et attitude -> couples -> poussée de chaque moteur
-  (contrôle géométrique sur SO(3)). Même interface que le modèle cinématique : vitesse en repère drone
-  et vitesse de lacet.
+  (contrôle géométrique sur SO(3)). Commande : vitesse voulue et vitesse de lacet.
 
 Repères : le simulateur est Y-haut, MuJoCo Z-haut. (x, y, z)_sim -> (x, -z, y)_mujoco.
 Repère du corps MuJoCo : x avant, y gauche, z haut.
@@ -22,7 +21,7 @@ G = 9.81
 MASS = 0.377               # masse de l'Avata 2 (kg)
 THRUST_TO_WEIGHT = 3.0     # poussée max totale / poids
 YAW_COEF = 0.015           # couple de lacet / poussée d'un rotor (m)
-TIMESTEP = 0.005           # pas de physique (s)
+TIMESTEP = 0.002           # pas de physique (s), petit pour des contacts raides
 TILT_MAX = math.radians(30.0)   # inclinaison max, proche des DJI en évitement d'obstacles
 ACC_MAX = 15.0             # accélération horizontale demandée max (m/s²)
 KV, KI = 5.0, 0.8         # gains vitesse : proportionnel (1/s) et intégral (compense la traînée)
@@ -80,7 +79,8 @@ def drone_mjcf(half, colliders):
     {colliders_to_mjcf(colliders)}
     <body name="drone" pos="0 0 1">
       <freejoint/>
-      <geom name="hull" type="box" size="{hx:.4f} {hy:.4f} {hz:.4f}" mass="{MASS}" friction="0.6"/>
+      <geom name="hull" type="box" size="{hx:.4f} {hy:.4f} {hz:.4f}" mass="{MASS}" friction="0.6"
+            solref="0.004 1" solimp="0.95 0.99 0.001" margin="0.02"/>
       {sites}
     </body>
   </worldbody>
@@ -100,6 +100,7 @@ class MujocoFlight:
         self.yaw_target = math.radians(-yaw_deg)     # lacet MuJoCo = -lacet simulateur
         self.time_tilted = 0.0
         self.v_int = np.zeros(3)
+        self.t_acc = 0.0
         self.sync_scene(colliders)
         self.reset(position, yaw_deg)
 
@@ -209,7 +210,11 @@ class MujocoFlight:
         self.yaw_target = psi + float(np.clip(err, -YAW_ERR_MAX, YAW_ERR_MAX))
 
         hit = False
-        for _ in range(max(1, round(dt / TIMESTEP))):
+        # Accumulateur : le temps simulé suit le temps réel quel que soit le nombre d'images par seconde
+        self.t_acc += dt
+        n_steps = int(self.t_acc / TIMESTEP)
+        self.t_acc -= n_steps * TIMESTEP
+        for _ in range(n_steps):
             self.data.ctrl[:] = self._control(v_des, self.yaw_target)
             mujoco.mj_step(self.model, self.data)
             if self.contact:

@@ -25,7 +25,7 @@ Hors vision : la génération d'obstacles et le moteur physique ne sont pas le c
 | Navigation | Algorithme déterministe (A* sur la carte, contrôleur vers la cible) | — |
 | Cible | Coordonnée connue dans le monde | La vision sert à percevoir les obstacles, pas à trouver la cible. |
 | Lumière comme indice | **Abandonné** | Peu fiable, pas utilisé par les vraies solutions. |
-| Physique | **Hybride : MuJoCo pour la dynamique de vol et les chocs, rendu moderngl gardé** (`mujoco_flight.py`). Ancien modèle cinématique sélectionnable | Vraie dynamique (4 moteurs, inertie, gravité, traînée, chocs) sans perdre shaders, instanciation, panneau ni vérité terrain. Une migration complète du rendu vers MuJoCo coûtait 8 à 12 jours sans gain pour la vision (étude du 21/10). |
+| Physique | **Hybride : MuJoCo pour la dynamique de vol et les chocs, rendu moderngl gardé** (`mujoco_flight.py`). L'ancien modèle cinématique a été retiré le 21/10 | Vraie dynamique (4 moteurs, inertie, gravité, traînée, chocs) sans perdre shaders, instanciation, panneau ni vérité terrain. Une migration complète du rendu vers MuJoCo coûtait 8 à 12 jours sans gain pour la vision (étude du 21/10). |
 
 ## Ce qui est fait
 
@@ -47,8 +47,8 @@ Hors vision : la génération d'obstacles et le moteur physique ne sont pas le c
   - Dalle béton intérieure lissée avec joints de dilatation et réflexion spéculaire.
   - Éclairage équilibré (soleil direct + ambiance hémisphérique ciel/sol + illumination de rebond intérieure) assurant une visibilité claire à l'intérieur.
 - **Modèle 3D du drone** DJI Avata 2 chargé depuis le GLB, à l'échelle réelle (21 × 6 × 18 cm).
-- **Vol par MuJoCo** (par défaut, `mujoco_flight.py`) : quadrotor à 4 moteurs à l'échelle de l'Avata 2 (377 g, boîte du GLB, poussée max 3 × poids), traînée de l'air, pas de 5 ms. Contrôleur en cascade : vitesse (PI) -> poussée et attitude (inclinaison max 30°) -> couples (contrôle géométrique sur SO(3)) -> poussée de chaque moteur. Même commande qu'avant (vitesse en repère drone + vitesse de lacet). La scène de collision MuJoCo est générée depuis les collisionneurs (`Box`, `Sphere`, `VerticalCylinder`, `Ground`) et reconstruite au changement d'environnement. Un choc peut faire basculer le drone ; renversé au sol plus d'1 s, il est redressé sur place. Caméras **fixées au châssis** par défaut (elles suivent tangage et roulis : la paire reste rectifiée, mais le passage en repère monde doit utiliser la rotation 3D complète), ou stabilisées (case du panneau).
-- **Modèle de vol cinématique** (historique, `--vol cinematique` ou panneau) : inertie, accélération limitée, inclinaisons dynamiques en tangage et roulis (*tilt / banked turn*), compatible pilotage clavier et manette (support GLFW gamepad avec détection automatique).
+- **Vol par MuJoCo** (`mujoco_flight.py`) : quadrotor à 4 moteurs à l'échelle de l'Avata 2 (377 g, boîte du GLB, poussée max 3 × poids), traînée de l'air. Contrôleur en cascade : vitesse (PI) -> poussée et attitude (inclinaison max 30°) -> couples (contrôle géométrique sur SO(3)) -> poussée de chaque moteur. Même commande qu'avant (vitesse en repère drone + vitesse de lacet). La scène de collision MuJoCo est générée depuis les collisionneurs (`Box`, `Sphere`, `VerticalCylinder`, `Ground`) et reconstruite au changement d'environnement. Un choc peut faire basculer le drone ; renversé au sol plus d'1 s, il est redressé sur place. Caméras **fixées au châssis** par défaut (elles suivent tangage et roulis : la paire reste rectifiée, mais le passage en repère monde doit utiliser la rotation 3D complète), ou stabilisées (case du panneau).
+- Pilotage clavier et manette (support GLFW gamepad avec détection automatique). Contacts MuJoCo raidis (pas de 2 ms, `solref` 4 ms, marge 2 cm) et caméras 3 cm en retrait de la face avant : elles ne passent pas dans les murs. Le drone n'est pas rendu dans ses propres caméras.
 - **Deux caméras** sur la face avant du drone, parallèles (paire déjà rectifiée), fovy 60°, inclinables.
 - **Panneau latéral** (Dear ImGui) : choix des vues, bascule manette, sliders de réglage en direct (vitesse max en m/s et km/h, sensibilité lacet et caméra), sélecteur de bâtiment (Procédural / Aucun), **boutons de téléportation rapide** (Portail hangar, Grand hall, Mezzanine, Atelier, Toit), option de quadrillage du sol, télémétrie complète.
 - Slides des cours 1 à 4 récupérées depuis Moodle (`Docs/Slides`).
@@ -70,7 +70,7 @@ Projet/
 ├── PROJET.md               ce fichier
 ├── building.py             générateur de bâtiment procédural, collision exacte et shader architectural
 ├── scene.py                point d'entrée : scène, drone, caméras, panneau, boucle principale
-├── collision.py            collisions cinématiques (boîte du drone vs sol, sphères, boîtes)
+├── collision.py            formes de collision des environnements (boîtes, sphères, cylindres, sol), converties pour MuJoCo
 ├── mujoco_flight.py        vol par MuJoCo : quadrotor, scène de collision, contrôleur en cascade
 ├── gltf_loader.py          chargeur GLB (géométrie, normales, UVs, textures, couleurs)
 ├── ui_panel.py             panneau latéral ImGui (choix des vues, réglages vol, téléportation, infos)
@@ -91,8 +91,7 @@ Réglages en haut de `scene.py` : `STEREO_BASELINE`, `CAMERA_FOVY`, `SPLIT`, `WI
 
 ```bash
 pip install -r requirements.txt
-python scene.py                      # vol MuJoCo
-python scene.py --vol cinematique    # ancien modèle de vol
+python scene.py
 ```
 
 Commandes : ZQSD pour se déplacer, Espace / Ctrl pour monter / descendre, Shift pour accélérer. Clic dans une vue pour piloter à la souris (lacet et inclinaison des caméras), Échap pour libérer la souris, Tab pour la caméra de suivi.

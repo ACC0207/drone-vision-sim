@@ -91,17 +91,9 @@ class SidePanel:
 
             imgui.spacing()
             imgui.separator()
-            imgui.text("Modèle de vol")
-            if settings.get("mujoco_available", False):
-                if imgui.radio_button("Dynamique (MuJoCo)", settings["flight_model"] == "mujoco"):
-                    settings["flight_model"] = "mujoco"
-            else:
-                imgui.text_colored(imgui.ImVec4(0.6, 0.6, 0.6, 1.0), "(pip install mujoco)")
-            if imgui.radio_button("Cinématique", settings.get("flight_model") == "cinematique"):
-                settings["flight_model"] = "cinematique"
-            if settings.get("flight_model") == "mujoco":
-                _, settings["cams_on_chassis"] = imgui.checkbox(
-                    "Caméras fixées au châssis", settings.get("cams_on_chassis", True))
+            imgui.text("Caméras")
+            _, settings["cams_on_chassis"] = imgui.checkbox(
+                "Fixées au châssis", settings.get("cams_on_chassis", True))
 
             imgui.spacing()
             imgui.separator()
