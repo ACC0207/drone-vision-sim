@@ -36,6 +36,11 @@ from forest_env import ForestAssets, ForestEnv
 from ui_panel import PANEL_WIDTH, SidePanel
 from walls_env import WallMaze
 
+try:
+    from mujoco_flight import MujocoFlight
+except ImportError:  # mujoco non installé : seul le vol cinématique est disponible
+    MujocoFlight = None
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 DRONE_MODEL = os.path.join(HERE, "Assets", "models", "DJI_Avata2_Sketchfab.glb")
 
@@ -49,6 +54,7 @@ WORLD_CAMERA_TARGET = (0.0, 3.0, -10.0)
 # Environnements : valeur de settings["building_mode"]
 ENV_BUILDING, ENV_WALLS, ENV_EMPTY, ENV_FOREST = 0, 1, 2, 3
 ENV_NAMES = {"batiment": ENV_BUILDING, "murs": ENV_WALLS, "vide": ENV_EMPTY, "foret": ENV_FOREST}
+FLIGHT_MODELS = ("mujoco", "cinematique")  # dynamique MuJoCo (quadrotor) ou modèle cinématique historique
 BUILDING_SPAWN = ((-2.7, 1.4, 2.0), -90.0)
 
 
@@ -88,7 +94,11 @@ def translation(x, y, z):
 
 
 class Camera:
-    """Caméra yaw/pitch. Repère monde : Y vers le haut."""
+    """Caméra yaw/pitch. Repère monde : Y vers le haut.
+
+    Si `rotation` est donnée (colonnes droite, haut, avant en repère monde), elle remplace
+    yaw/pitch : caméra fixée à un châssis qui s'incline (tangage et roulis).
+    """
 
     def __init__(self, position, yaw=-90.0, pitch=0.0, fovy=60.0, near=0.1):
         self.position = np.array(position, dtype="f4")
@@ -96,19 +106,31 @@ class Camera:
         self.pitch = pitch
         self.fovy = fovy
         self.near = near
+        self.rotation = None
 
     @property
     def forward(self):
+        if self.rotation is not None:
+            return self.rotation[:, 2].astype("f4")
         y, p = math.radians(self.yaw), math.radians(self.pitch)
         return np.array([math.cos(p) * math.cos(y), math.sin(p), math.cos(p) * math.sin(y)], dtype="f4")
 
     @property
     def right(self):
+        if self.rotation is not None:
+            return self.rotation[:, 0].astype("f4")
         r = np.cross(self.forward, np.array([0, 1, 0], dtype="f4"))
         return r / np.linalg.norm(r)
 
+    @property
+    def up(self):
+        if self.rotation is not None:
+            return self.rotation[:, 1].astype("f4")
+        return np.cross(self.right, self.forward)
+
     def view(self):
-        return look_at(self.position, self.position + self.forward, np.array([0, 1, 0], dtype="f4"))
+        up = self.rotation[:, 1] if self.rotation is not None else (0.0, 1.0, 0.0)
+        return look_at(self.position, self.position + self.forward, np.array(up, dtype="f4"))
 
     def projection(self, aspect):
         return perspective(self.fovy, aspect, self.near, 500.0)
@@ -438,12 +460,11 @@ class Scene:
 # ---------------------------------------------------------------------------
 
 class Drone:
-    """Drone avec dynamique de vol réaliste (modèle stabilisé type DJI) :
-    - Commande en vitesse (m/s) directement exploitable par un algo (A*) ou CNN
-    - Inertie et accélération maximale
-    - Inclinaison naturelle (tangage et roulis par platitude différentielle)
-    - Caméras frontales stéréo montées avec découplage du roulis/tangage pour préserver
-      la rectitude de la géométrie épipolaire.
+    """Drone commandé en vitesse (m/s, repère drone) et en vitesse de lacet, avec deux modèles de vol :
+    - "mujoco" : quadrotor à 4 moteurs simulé par MuJoCo (mujoco_flight.py), vrais chocs ;
+      caméras fixées au châssis (elles s'inclinent avec lui) ou stabilisées ;
+    - "cinematique" : modèle historique (inertie du 1er ordre, collisions cinématiques),
+      inclinaison du châssis visuelle seulement, caméras stabilisées.
     """
 
     def __init__(self, scene, position, yaw=-90.0):
@@ -468,7 +489,31 @@ class Drone:
         ]
 
         self.cameras = [Camera(position, fovy=CAMERA_FOVY, near=0.02) for _ in range(2)]
+        self.flight_model = "cinematique"
+        self.flight = None            # MujocoFlight en mode "mujoco"
+        self.flight_pos = None        # dernière position donnée par MuJoCo (détecte les téléportations)
+        self.cams_on_chassis = True   # mode "mujoco" : caméras fixées au châssis
         self.update_cameras()
+
+    def set_flight_model(self, name):
+        """Change de modèle de vol en gardant la position et le lacet. Retourne le modèle actif."""
+        if name == "mujoco" and MujocoFlight is not None:
+            self.flight = MujocoFlight(self.box.half, self.scene.colliders, self.position, self.yaw)
+            self.flight_pos = self.position.copy()
+            self.flight_model = "mujoco"
+        else:
+            self.flight = None
+            self.flight_model = "cinematique"
+            self.pitch = self.roll = 0.0
+        self.update_cameras()
+        return self.flight_model
+
+    def body_axes(self):
+        """Axes du châssis en repère monde : (avant, gauche, haut)."""
+        if self.flight is not None:
+            R = self.flight.rotation
+            return R[:, 0], R[:, 1], R[:, 2]
+        return self.forward, -self.right, np.array([0.0, 1.0, 0.0])
 
     @property
     def forward(self):
@@ -483,6 +528,13 @@ class Drone:
 
     def model_matrix(self):
         """Repère modèle -> monde avec lacet (yaw), tangage (pitch) et roulis (roll)."""
+        if self.flight is not None:
+            # Orientation complète calculée par MuJoCo
+            fwd, left, up = self.body_axes()
+            rot4 = np.identity(4, dtype="f4")
+            rot4[:3, :3] = np.column_stack([left, up, fwd])
+            m = translation(*self.position) @ rot4 @ translation(*(-self.center_offset))
+            return m.astype("f4")
         fwd = self.forward
         right = self.right
         # Repère de base : +X modèle = gauche (-right), +Y = haut, +Z = avant
@@ -512,9 +564,23 @@ class Drone:
 
     def update_cameras(self):
         """Les caméras sont sur la face avant, à ±baseline/2 du centre."""
+        if self.flight is not None and self.cams_on_chassis:
+            # Caméras solidaires du châssis : la paire reste rectifiée, mais suit tangage et roulis
+            fwd, left, up = self.body_axes()
+            right = -left
+            p = math.radians(self.camera_pitch)
+            cam_fwd = math.cos(p) * fwd + math.sin(p) * up
+            cam_up = -math.sin(p) * fwd + math.cos(p) * up
+            front = self.position + fwd * self.box.half[2]
+            for cam, side in zip(self.cameras, (-0.5, 0.5)):
+                cam.position = (front + right * side * STEREO_BASELINE).astype("f4")
+                cam.rotation = np.column_stack([right, cam_up, cam_fwd])
+                cam.yaw, cam.pitch = self.yaw, self.camera_pitch
+            return
         front = self.position + self.forward * self.box.half[2]
         for cam, side in zip(self.cameras, (-0.5, 0.5)):  # gauche, droite
             cam.position = (front + self.right * side * STEREO_BASELINE).astype("f4")
+            cam.rotation = None
             cam.yaw = self.yaw
             cam.pitch = self.camera_pitch
 
@@ -534,6 +600,9 @@ class Drone:
         v_target = (self.forward * v_fwd_cmd +
                     self.right * v_right_cmd +
                     np.array([0.0, v_up_cmd, 0.0]))
+
+        if self.flight is not None:
+            return self._update_mujoco(dt, v_target, cmd_yaw_rate)
 
         # Paramètres dynamiques (inertie + limites des moteurs)
         tau = 0.22           # temps de réponse en vitesse (s)
@@ -591,6 +660,24 @@ class Drone:
         self.pitch += (target_pitch - self.pitch) * filter_factor
         self.roll += (target_roll - self.roll) * filter_factor
 
+        self.update_cameras()
+        return hit
+
+    def _update_mujoco(self, dt, v_target, cmd_yaw_rate):
+        flight = self.flight
+        flight.sync_scene(self.scene.colliders)
+        if not np.allclose(self.position, self.flight_pos):
+            # Position changée de l'extérieur (téléportation, changement d'environnement)
+            flight.reset(self.position, self.yaw, self.velocity)
+        hit = flight.step(dt, v_target, cmd_yaw_rate)
+        self.position = flight.position
+        self.flight_pos = self.position.copy()
+        self.velocity = flight.velocity
+        self.yaw = flight.yaw_deg
+        fwd, left, _ = self.body_axes()
+        self.pitch = math.degrees(-math.asin(np.clip(fwd[1], -1.0, 1.0)))   # > 0 : nez vers le bas
+        self.roll = math.degrees(math.asin(np.clip(left[1], -1.0, 1.0)))    # > 0 : penché à droite
+        self.contact = hit
         self.update_cameras()
         return hit
 
@@ -696,6 +783,8 @@ def main():
     parser = argparse.ArgumentParser(description="Simulation de drone stéréo")
     parser.add_argument("--env", choices=sorted(ENV_NAMES), default="murs", help="environnement de départ")
     parser.add_argument("--seed", type=int, default=0, help="graine des environnements « murs » et « foret »")
+    parser.add_argument("--vol", choices=FLIGHT_MODELS, default="mujoco",
+                        help="modèle de vol : dynamique MuJoCo ou cinématique historique")
     args = parser.parse_args()
     start_mode = ENV_NAMES[args.env]
 
@@ -717,6 +806,8 @@ def main():
     scene.building_mode = start_mode
     spawn_pos, spawn_yaw = scene.spawn(start_mode)
     drone = Drone(scene, position=spawn_pos, yaw=spawn_yaw)
+    if drone.set_flight_model(args.vol) != args.vol:
+        print("mujoco n'est pas installé (pip install mujoco) : vol cinématique")
     panel = SidePanel()
 
     # Paramètres de l'interface et du contrôle
@@ -737,6 +828,9 @@ def main():
         "regen_forest": False,     # bouton « Nouvelle forêt »
         "forest_spawn": None,
         "forest_info": [],
+        "flight_model": drone.flight_model,       # "mujoco" ou "cinematique"
+        "mujoco_available": MujocoFlight is not None,
+        "cams_on_chassis": drone.cams_on_chassis,
     }
     last_mode = start_mode
 
@@ -933,6 +1027,11 @@ def main():
             drone.yaw, drone.pitch, drone.roll = float(t_yaw), 0.0, 0.0
             drone.update_cameras()
 
+        # Modèle de vol choisi dans le panneau
+        if settings["flight_model"] != drone.flight_model:
+            settings["flight_model"] = drone.set_flight_model(settings["flight_model"])
+        drone.cams_on_chassis = bool(settings["cams_on_chassis"])
+
         # Vecteur de consigne de vitesse [m/s]
         v_cmd = np.array([cmd_fwd * max_h, cmd_right * max_h, cmd_up * max_v])
 
@@ -975,6 +1074,7 @@ def main():
                 f"Cam. inc.: {drone.camera_pitch:5.1f} deg",
                 f"Base st. : {STEREO_BASELINE * 100:.0f} cm",
                 "Contact  : OUI" if drone.contact else "Contact  : non",
+                f"Vol      : {'MuJoCo' if drone.flight is not None else 'cinématique'}",
             ]
             if scene.target() is not None:
                 d_target = float(np.linalg.norm(scene.target() - drone.position))
