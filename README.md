@@ -10,13 +10,22 @@ Détails des choix, de l'avancement et des prochaines étapes : [PROJET.md](PROJ
 pip install -r requirements.txt
 ```
 
-Le modèle du drone (`Assets/models/DJI_Avata2_Sketchfab.glb`, DJI Avata 2 issu de Sketchfab) est inclus dans le dépôt.
+Le modèle du drone (`Assets/models/DJI_Avata2_Sketchfab.glb`, DJI Avata 2 issu de Sketchfab) et le pin de la forêt (`Assets/models/pine/`) sont inclus dans le dépôt.
 
 ## Lancer
 
 ```bash
 python scene.py
 ```
+
+Options : `--env murs|foret|batiment|vide` choisit l'environnement de départ (par défaut `murs`), `--seed N` fixe la graine des murs troués et de la forêt.
+
+## Environnements
+
+- **Murs troués** (`walls_env.py`) : murs successifs (une texture différente par mur : enduit, bois, tôle, pierre, parpaings) percés de passages, de culs-de-sac (poches fermées) et d'ouvertures trop étroites. Un chemin vers la cible (sphère verte) est garanti, un plafond invisible empêche de passer par-dessus. Généré à partir d'une graine ; vérité terrain des ouvertures via `get_openings()`. Bouton « Nouveaux murs » dans le panneau.
+- **Forêt** (`forest_env.py`) : forêt dense de pins à tronc droit (environ 165 pins de 11 à 14 m sur 50 × 50 m, aiguilles à partir de 22 % de la hauteur) sur un sol procédural, dessinée en instanciation. Le pin est le modèle « fir_spruce » téléchargé, préparé par `tools/prepare_pine.py` (Blender en ligne de commande : objet des branches supprimé, il reste le fût et les cartes d'aiguilles) dans `Assets/models/pine/`. Collisions : cylindre par tronc, deux cylindres pour le feuillage. Bouton « Nouvelle forêt » dans le panneau.
+- **Bâtiment** (`building.py`) : bâtiment industriel procédural pour le vol intérieur.
+- **Vide** : sol seul.
 
 ## Commandes
 
@@ -37,7 +46,10 @@ Le panneau de gauche permet de choisir les vues (caméra gauche, caméra droite,
 |---|---|
 | `scene.py` | point d'entrée : scène, drone, caméras, boucle principale |
 | `building.py` | bâtiment procédural et ses collisions |
-| `collision.py` | collisions du drone (sol, sphères, boîtes) |
+| `walls_env.py` | environnement « murs troués » |
+| `forest_env.py` | environnement « forêt » (rendu instancié) |
+| `collision.py` | formes de collision des environnements (converties pour MuJoCo) |
+| `mujoco_flight.py` | dynamique de vol par MuJoCo : quadrotor, contrôleur en cascade |
 | `gltf_loader.py` | chargeur GLB |
 | `ui_panel.py` | panneau latéral ImGui |
 | `Docs/Approche_vision_drone.md` | approche vision détaillée |

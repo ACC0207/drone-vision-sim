@@ -81,6 +81,15 @@ class SidePanel:
                 "##yaw_sens", float(yaw_val), 0.2, 3.0, "x%.2f"
             )
 
+            # Contrôleur de vitesse : réactivité aux changements de direction et freinage
+            for key, label, lo, hi, fmt in (
+                    ("ctrl_kv", "Réactivité (gain vitesse) :", 1.0, 15.0, "%.1f /s"),
+                    ("ctrl_ki", "Gain intégral :", 0.0, 3.0, "%.2f"),
+                    ("ctrl_tilt", "Inclinaison max / freinage :", 10.0, 60.0, "%.0f °")):
+                imgui.text(label)
+                imgui.set_next_item_width(-1)
+                _, settings[key] = imgui.slider_float("##" + key, float(settings[key]), lo, hi, fmt)
+
             # Sensibilité caméra
             cam_val = settings.get("cam_sens", 1.0)
             imgui.text("Sensibilité caméra :")
@@ -88,6 +97,12 @@ class SidePanel:
             _, settings["cam_sens"] = imgui.slider_float(
                 "##cam_sens", float(cam_val), 0.2, 3.0, "x%.2f"
             )
+
+            imgui.spacing()
+            imgui.separator()
+            imgui.text("Caméras")
+            _, settings["cams_on_chassis"] = imgui.checkbox(
+                "Fixées au châssis", settings.get("cams_on_chassis", True))
 
             imgui.spacing()
             imgui.separator()
@@ -107,12 +122,48 @@ class SidePanel:
             _, settings["show_grid"] = imgui.checkbox("Quadriller le sol", settings.get("show_grid", True))
 
             imgui.spacing()
-            imgui.text("Modèle de bâtiment :")
+            imgui.text("Environnement :")
             mode = settings.get("building_mode", 0)
-            if imgui.radio_button("Procédural (vol intérieur)", mode == 0):
+            if imgui.radio_button("Murs troués", mode == 1):
+                settings["building_mode"] = 1
+            if imgui.radio_button("Forêt", mode == 3):
+                settings["building_mode"] = 3
+            if imgui.radio_button("Bâtiment (vol intérieur)", mode == 0):
                 settings["building_mode"] = 0
-            if imgui.radio_button("Sans bâtiment", mode == 2):
+            if imgui.radio_button("Vide", mode == 2):
                 settings["building_mode"] = 2
+
+            if mode == 1:
+                imgui.spacing()
+                imgui.separator()
+                imgui.text("Murs troués")
+                btn_w = PANEL_WIDTH - 25
+                if imgui.button("Nouveaux murs (graine aléatoire)", imgui.ImVec2(btn_w, 24)):
+                    settings["regen_maze"] = True
+                if imgui.button("Retour au départ", imgui.ImVec2(btn_w, 24)):
+                    settings["teleport"] = settings.get("maze_spawn")
+                imgui.spacing()
+                for line in settings.get("maze_info", []):
+                    imgui.text_colored(imgui.ImVec4(0.7, 0.7, 0.7, 1.0), line)
+                imgui.text_colored(imgui.ImVec4(0.3, 0.9, 0.4, 1.0), "Cible : sphère verte")
+
+            if mode == 3:
+                imgui.spacing()
+                imgui.separator()
+                imgui.text("Forêt")
+                btn_w = PANEL_WIDTH - 25
+                if imgui.button("Nouvelle forêt (graine aléatoire)", imgui.ImVec2(btn_w, 24)):
+                    settings["regen_forest"] = True
+                _, settings["forest_density"] = imgui.slider_float(
+                    "Densité (arbres/100 m²)", settings["forest_density"], 1.0, 10.0, "%.1f")
+                if imgui.is_item_deactivated_after_edit():  # régénère au relâchement du slider
+                    settings["regen_forest_density"] = True
+                if imgui.button("Retour au départ##foret", imgui.ImVec2(btn_w, 24)):
+                    settings["teleport"] = settings.get("forest_spawn")
+                imgui.spacing()
+                for line in settings.get("forest_info", []):
+                    imgui.text_colored(imgui.ImVec4(0.7, 0.7, 0.7, 1.0), line)
+                imgui.text_colored(imgui.ImVec4(0.3, 0.9, 0.4, 1.0), "Cible : sphère verte")
 
             if mode == 0:
                 imgui.spacing()

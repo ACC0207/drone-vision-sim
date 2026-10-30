@@ -19,8 +19,10 @@ Contrôles :
   Échap (non capturé): quitter
 """
 
+import argparse
 import math
 import os
+import random
 import sys
 
 import glfw
@@ -28,19 +30,29 @@ import moderngl
 import numpy as np
 
 from building import ProceduralBuilding
-from collision import Box, DroneBox, Ground, Sphere, move_with_collisions
+from collision import Box, Ground, Sphere
 from gltf_loader import bounds, load_glb
+from forest_env import FOREST_DENSITY_DEFAULT, ForestAssets, ForestEnv
 from ui_panel import PANEL_WIDTH, SidePanel
+import mujoco_flight
+from mujoco_flight import MujocoFlight
+from walls_env import WallMaze
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DRONE_MODEL = os.path.join(HERE, "Assets", "models", "DJI_Avata2_Sketchfab.glb")
 
 STEREO_BASELINE = 0.18     # distance entre les deux caméras (m)
 CAMERA_FOVY = 60.0         # champ vertical des caméras du drone (degrés)
+CAMERA_SETBACK = 0.03      # retrait des caméras derrière la face avant du drone (m)
 SPLIT = "side_by_side"     # vues en colonnes ("side_by_side") ou en lignes ("stacked")
 WINDOW_SIZE = (1860, 600)  # panneau de 270 px + vues
 WORLD_CAMERA_POSITION = (12.0, 9.0, 6.0)   # caméra fixe du monde
 WORLD_CAMERA_TARGET = (0.0, 3.0, -10.0)
+
+# Environnements : valeur de settings["building_mode"]
+ENV_BUILDING, ENV_WALLS, ENV_EMPTY, ENV_FOREST = 0, 1, 2, 3
+ENV_NAMES = {"batiment": ENV_BUILDING, "murs": ENV_WALLS, "vide": ENV_EMPTY, "foret": ENV_FOREST}
+BUILDING_SPAWN = ((-2.7, 1.4, 2.0), -90.0)
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +91,11 @@ def translation(x, y, z):
 
 
 class Camera:
-    """Caméra yaw/pitch. Repère monde : Y vers le haut."""
+    """Caméra yaw/pitch. Repère monde : Y vers le haut.
+
+    Si `rotation` est donnée (colonnes droite, haut, avant en repère monde), elle remplace
+    yaw/pitch : caméra fixée à un châssis qui s'incline (tangage et roulis).
+    """
 
     def __init__(self, position, yaw=-90.0, pitch=0.0, fovy=60.0, near=0.1):
         self.position = np.array(position, dtype="f4")
@@ -87,19 +103,31 @@ class Camera:
         self.pitch = pitch
         self.fovy = fovy
         self.near = near
+        self.rotation = None
 
     @property
     def forward(self):
+        if self.rotation is not None:
+            return self.rotation[:, 2].astype("f4")
         y, p = math.radians(self.yaw), math.radians(self.pitch)
         return np.array([math.cos(p) * math.cos(y), math.sin(p), math.cos(p) * math.sin(y)], dtype="f4")
 
     @property
     def right(self):
+        if self.rotation is not None:
+            return self.rotation[:, 0].astype("f4")
         r = np.cross(self.forward, np.array([0, 1, 0], dtype="f4"))
         return r / np.linalg.norm(r)
 
+    @property
+    def up(self):
+        if self.rotation is not None:
+            return self.rotation[:, 1].astype("f4")
+        return np.cross(self.right, self.forward)
+
     def view(self):
-        return look_at(self.position, self.position + self.forward, np.array([0, 1, 0], dtype="f4"))
+        up = self.rotation[:, 1] if self.rotation is not None else (0.0, 1.0, 0.0)
+        return look_at(self.position, self.position + self.forward, np.array(up, dtype="f4"))
 
     def projection(self, aspect):
         return perspective(self.fovy, aspect, self.near, 500.0)
@@ -264,7 +292,7 @@ void main() {
 class Scene:
     """Contient les objets (et leurs collisionneurs) et sait se dessiner depuis une caméra."""
 
-    def __init__(self, ctx):
+    def __init__(self, ctx, maze_seed=0):
         self.ctx = ctx
         self.prog = ctx.program(vertex_shader=VERTEX_SHADER, fragment_shader=FRAGMENT_SHADER)
         self.objects = []  # objets de base (sol, sphère, etc.)
@@ -278,21 +306,81 @@ class Scene:
         # Bâtiment industriel procédural (vol intérieur + shader architectural)
         self.procedural_building = ProceduralBuilding(self.ctx, origin=(0.0, 0.0, -12.0))
 
+        # Environnement « murs troués » (placé à l'écart, en x = 60)
+        self.wall_maze = WallMaze(self.ctx, seed=maze_seed)
+        # Forêt (placée en x = -80) : chargée à la première sélection (modèles et textures)
+        self.forest_assets = None
+        self.forest = None
+        self.forest_seed = maze_seed
+        self.forest_density = FOREST_DENSITY_DEFAULT
+        v, i = make_sphere(0.25)
+        self.target_vao = self.make_vao(v, i)
+
         # Sphère et mur de test conservés dans la scène
         v, i = make_sphere(1.0)
         self.add(v, i, translation(14.0, 1.0, -5.0), (0.85, 0.25, 0.2), collider=Sphere((14.0, 1.0, -5.0), 1.0))
         self.add_wall_with_hole(z=-28.0)
 
-        # Mode actif : 0 = procédural, 2 = aucun
-        self.building_mode = 0
+        # Environnement actif : ENV_BUILDING, ENV_WALLS ou ENV_EMPTY
+        self.building_mode = ENV_BUILDING
 
     @property
     def colliders(self):
         """Collisionneurs dynamiques selon le modèle de bâtiment actif."""
-        if self.building_mode == 0 and self.procedural_building is not None:
+        if self.building_mode == ENV_BUILDING and self.procedural_building is not None:
             return [*self.base_colliders, *self.procedural_building.colliders]
-        else:
-            return self.base_colliders
+        if self.building_mode == ENV_WALLS:
+            return [*self.base_colliders, *self.wall_maze.colliders]
+        if self.building_mode == ENV_FOREST and self.forest is not None:
+            return [*self.base_colliders, *self.forest.colliders]
+        return self.base_colliders
+
+    def ensure_forest(self):
+        if self.forest is None:
+            self.forest_assets = ForestAssets(self.ctx)
+            self.forest = ForestEnv(self.ctx, self.forest_assets, seed=self.forest_seed,
+                                    tree_density=self.forest_density)
+        return self.forest
+
+    def regenerate_forest(self, seed, density=None):
+        self.ensure_forest().release()
+        self.forest_seed = seed
+        if density is not None:
+            self.forest_density = density
+        self.forest = ForestEnv(self.ctx, self.forest_assets, seed=seed, tree_density=self.forest_density)
+
+    def regenerate_maze(self, seed):
+        self.wall_maze.release()
+        self.wall_maze = WallMaze(self.ctx, seed=seed)
+
+    def spawn(self, mode):
+        if mode == ENV_WALLS:
+            return self.wall_maze.spawn
+        if mode == ENV_FOREST:
+            return self.ensure_forest().spawn
+        return BUILDING_SPAWN
+
+    def overview_camera(self, mode):
+        if mode == ENV_WALLS:
+            return self.wall_maze.overview_camera
+        if mode == ENV_FOREST:
+            return self.ensure_forest().overview_camera
+        return WORLD_CAMERA_POSITION, WORLD_CAMERA_TARGET
+
+    def target(self):
+        """Cible de l'environnement actif, ou None."""
+        if self.building_mode == ENV_WALLS:
+            return self.wall_maze.target
+        if self.building_mode == ENV_FOREST and self.forest is not None:
+            return self.forest.target
+        return None
+
+    def target_items(self):
+        """Repère vert de la cible (murs, forêt), pour les vues extérieures."""
+        target = self.target()
+        if target is None:
+            return []
+        return [(self.target_vao, translation(*target), (0.1, 0.9, 0.2), False)]
 
     def make_texture(self, img):
         """Convertit une image PIL en texture ModernGL avec mipmapping."""
@@ -339,8 +427,12 @@ class Scene:
         self.building_mode = building_mode
 
         # 1. Rendu du bâtiment procédural avec son shader architectural dédié
-        if self.building_mode == 0 and self.procedural_building is not None:
+        if self.building_mode == ENV_BUILDING and self.procedural_building is not None:
             self.procedural_building.render(camera, aspect, light_dir=(-0.4, -1.0, -0.3))
+        elif self.building_mode == ENV_WALLS:
+            self.wall_maze.render(camera, aspect, light_dir=(-0.4, -1.0, -0.3))
+        elif self.building_mode == ENV_FOREST and self.forest is not None:
+            self.forest.render(camera, aspect, light_dir=(-0.4, -1.0, -0.3))
 
         # 2. Rendu des objets standard (sol, sphère, drone)
         self.prog["u_proj"].write(camera.projection(aspect).T.copy().tobytes())
@@ -369,12 +461,11 @@ class Scene:
 # ---------------------------------------------------------------------------
 
 class Drone:
-    """Drone avec dynamique de vol réaliste (modèle stabilisé type DJI) :
-    - Commande en vitesse (m/s) directement exploitable par un algo (A*) ou CNN
-    - Inertie et accélération maximale
-    - Inclinaison naturelle (tangage et roulis par platitude différentielle)
-    - Caméras frontales stéréo montées avec découplage du roulis/tangage pour préserver
-      la rectitude de la géométrie épipolaire.
+    """Drone commandé en vitesse (m/s, repère drone) et en vitesse de lacet.
+
+    La dynamique et les chocs sont calculés par MuJoCo (mujoco_flight.py : quadrotor à 4 moteurs,
+    contrôleur en cascade). Les caméras sont fixées au châssis (elles suivent tangage et roulis)
+    ou stabilisées (lacet seul).
     """
 
     def __init__(self, scene, position, yaw=-90.0):
@@ -386,20 +477,27 @@ class Drone:
         self.roll = 0.0                           # roulis châssis (degrés)
         self.camera_pitch = 0.0                   # inclinaison caméra (degrés)
         self.contact = False
-        self.last_acc = np.zeros(3, dtype="f8")
 
         parts = load_glb(DRONE_MODEL)
         lo, hi = bounds(parts)
         self.center_offset = (lo + hi) / 2.0           # centre de la boîte dans le repère modèle
         size = hi - lo                                 # (gauche-droite, hauteur, longueur)
-        self.box = DroneBox(size / 2.0)                # demi-dimensions (droite, haut, avant)
+        self.half = size / 2.0                         # demi-dimensions (droite, haut, avant)
         self.parts = [
             (scene.make_vao(v, i), tuple(max(c, 0.03) for c in color), scene.make_texture(tex_img) if tex_img else None)
             for v, i, color, tex_img in parts
         ]
 
         self.cameras = [Camera(position, fovy=CAMERA_FOVY, near=0.02) for _ in range(2)]
+        self.cams_on_chassis = True   # False : caméras stabilisées (lacet seul)
+        self.flight = MujocoFlight(self.half, scene.colliders, self.position, self.yaw)
+        self.flight_pos = self.position.copy()   # dernière position donnée par MuJoCo (détecte les téléportations)
         self.update_cameras()
+
+    def body_axes(self):
+        """Axes du châssis en repère monde : (avant, gauche, haut)."""
+        R = self.flight.rotation
+        return R[:, 0], R[:, 1], R[:, 2]
 
     @property
     def forward(self):
@@ -413,122 +511,60 @@ class Drone:
         return np.cross(self.forward, (0.0, 1.0, 0.0))
 
     def model_matrix(self):
-        """Repère modèle -> monde avec lacet (yaw), tangage (pitch) et roulis (roll)."""
-        fwd = self.forward
-        right = self.right
-        # Repère de base : +X modèle = gauche (-right), +Y = haut, +Z = avant
-        R0 = np.column_stack([-right, (0.0, 1.0, 0.0), fwd])
-
-        # Rotation tangage (autour de l'axe X du modèle) : pitch > 0 -> nez vers le bas
-        p = math.radians(self.pitch)
-        Rx = np.array([
-            [1.0, 0.0, 0.0],
-            [0.0, math.cos(p), -math.sin(p)],
-            [0.0, math.sin(p), math.cos(p)],
-        ])
-
-        # Rotation roulis (autour de l'axe Z du modèle) : roll > 0 -> inclinaison à droite
-        r = math.radians(self.roll)
-        Rz = np.array([
-            [math.cos(r), -math.sin(r), 0.0],
-            [math.sin(r), math.cos(r), 0.0],
-            [0.0, 0.0, 1.0],
-        ])
-
-        rot3 = R0 @ Rx @ Rz
+        """Repère modèle (+X gauche, +Y haut, +Z avant) -> monde, orientation complète du châssis."""
+        fwd, left, up = self.body_axes()
         rot4 = np.identity(4, dtype="f4")
-        rot4[:3, :3] = rot3
+        rot4[:3, :3] = np.column_stack([left, up, fwd])
         m = translation(*self.position) @ rot4 @ translation(*(-self.center_offset))
         return m.astype("f4")
 
     def update_cameras(self):
-        """Les caméras sont sur la face avant, à ±baseline/2 du centre."""
-        front = self.position + self.forward * self.box.half[2]
+        """Les caméras sont juste derrière la face avant, à ±baseline/2 du centre.
+
+        En retrait de CAMERA_SETBACK pour rester dans la coque quand le drone touche un obstacle.
+        """
+        if self.cams_on_chassis:
+            # Caméras solidaires du châssis : la paire reste rectifiée, mais suit tangage et roulis
+            fwd, left, up = self.body_axes()
+            right = -left
+        else:
+            fwd, right, up = self.forward, self.right, np.array([0.0, 1.0, 0.0])
+        p = math.radians(self.camera_pitch)
+        cam_fwd = math.cos(p) * fwd + math.sin(p) * up
+        cam_up = -math.sin(p) * fwd + math.cos(p) * up
+        front = self.position + fwd * (self.half[2] - CAMERA_SETBACK)
         for cam, side in zip(self.cameras, (-0.5, 0.5)):  # gauche, droite
-            cam.position = (front + self.right * side * STEREO_BASELINE).astype("f4")
-            cam.yaw = self.yaw
-            cam.pitch = self.camera_pitch
+            cam.position = (front + right * side * STEREO_BASELINE).astype("f4")
+            cam.rotation = np.column_stack([right, cam_up, cam_fwd])
+            cam.yaw, cam.pitch = self.yaw, self.camera_pitch
 
     def update(self, dt, cmd_velocity=None, cmd_yaw_rate=0.0):
-        """Met à jour la dynamique de vol du drone pour un pas dt.
+        """Avance la simulation de dt secondes.
 
-        cmd_velocity : vecteur [v_fwd, v_right, v_up] en m/s dans le repère drone.
+        cmd_velocity : vecteur [v_fwd, v_right, v_up] en m/s dans le repère drone (lacet seul).
         cmd_yaw_rate : vitesse angulaire en lacet (deg/s).
+        Retourne True si le drone touche un obstacle.
         """
-        if cmd_velocity is None:
-            cmd_velocity = np.zeros(3)
-        else:
-            cmd_velocity = np.asarray(cmd_velocity, dtype="f8")
-
-        v_fwd_cmd, v_right_cmd, v_up_cmd = cmd_velocity
+        v_fwd_cmd, v_right_cmd, v_up_cmd = np.zeros(3) if cmd_velocity is None else cmd_velocity
         # Vitesse désirée en repère monde
         v_target = (self.forward * v_fwd_cmd +
                     self.right * v_right_cmd +
                     np.array([0.0, v_up_cmd, 0.0]))
 
-        # Paramètres dynamiques (inertie + limites des moteurs)
-        tau = 0.22           # temps de réponse en vitesse (s)
-        target_h_norm = float(np.linalg.norm(v_target * np.array([1.0, 0.0, 1.0])))
-        a_max_horiz = max(10.0, target_h_norm * 1.8)
-        a_max_vert = max(8.0, abs(v_target[1]) * 1.8)
-
-        a_desired = (v_target - self.velocity) / tau
-        a_horiz = a_desired * np.array([1.0, 0.0, 1.0])
-        a_vert = a_desired[1]
-
-        norm_h = np.linalg.norm(a_horiz)
-        if norm_h > a_max_horiz:
-            a_horiz *= (a_max_horiz / norm_h)
-        a_vert = np.clip(a_vert, -a_max_vert, a_max_vert)
-
-        acc = np.array([a_horiz[0], a_vert, a_horiz[2]])
-        self.last_acc = acc
-        self.velocity += acc * dt
-
-        # Déplacement avec détection des collisions
-        displacement = self.velocity * dt
-        new_pos, hit = move_with_collisions(
-            self.position, displacement, self.forward, self.box, self.scene.colliders)
-
+        flight = self.flight
+        flight.sync_scene(self.scene.colliders)
+        if not np.allclose(self.position, self.flight_pos):
+            # Position changée de l'extérieur (téléportation, changement d'environnement)
+            flight.reset(self.position, self.yaw, self.velocity)
+        hit = flight.step(dt, v_target, cmd_yaw_rate)
+        self.position = flight.position
+        self.flight_pos = self.position.copy()
+        self.velocity = flight.velocity
+        self.yaw = flight.yaw_deg
+        fwd, left, _ = self.body_axes()
+        self.pitch = math.degrees(-math.asin(np.clip(fwd[1], -1.0, 1.0)))   # > 0 : nez vers le bas
+        self.roll = math.degrees(math.asin(np.clip(left[1], -1.0, 1.0)))    # > 0 : penché à droite
         self.contact = hit
-        if hit:
-            # En cas de choc, on adapte la vitesse au déplacement effectif
-            actual_vel = (new_pos - self.position) / max(dt, 1e-4)
-            self.velocity = actual_vel * 0.7
-
-        self.position = new_pos
-
-        # Mise à jour du lacet
-        self.yaw = (self.yaw + cmd_yaw_rate * dt) % 360.0
-
-        # Platitude différentielle : calcul des inclinaisons naturelles
-        a_fwd = float(np.dot(acc, self.forward))
-        a_right = float(np.dot(acc, self.right))
-        v_fwd = float(np.dot(self.velocity, self.forward))
-
-        # Virage coordonné (banked turn)
-        yaw_rate_rad = math.radians(cmd_yaw_rate)
-        turn_bank = (v_fwd * yaw_rate_rad) / 9.81 * 1.3
-
-        # Angles cibles bornés à ±25°
-        target_pitch = math.degrees(math.atan2(a_fwd, 9.81))
-        target_pitch = float(np.clip(target_pitch, -25.0, 25.0))
-
-        target_roll = math.degrees(math.atan2(a_right / 9.81 + turn_bank, 1.0))
-        target_roll = float(np.clip(target_roll, -25.0, 25.0))
-
-        # Lissage fluide des angles du châssis
-        filter_factor = 1.0 - math.exp(-dt / 0.10)
-        self.pitch += (target_pitch - self.pitch) * filter_factor
-        self.roll += (target_roll - self.roll) * filter_factor
-
-        self.update_cameras()
-        return hit
-
-    def move(self, displacement):
-        """Compatibilité avec l'ancien appel direct."""
-        self.position, hit = move_with_collisions(
-            self.position, displacement, self.forward, self.box, self.scene.colliders)
         self.update_cameras()
         return hit
 
@@ -624,6 +660,12 @@ def tile_viewports(x0, w, h, n):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Simulation de drone stéréo")
+    parser.add_argument("--env", choices=sorted(ENV_NAMES), default="murs", help="environnement de départ")
+    parser.add_argument("--seed", type=int, default=0, help="graine des environnements « murs » et « foret »")
+    args = parser.parse_args()
+    start_mode = ENV_NAMES[args.env]
+
     if not glfw.init():
         sys.exit("Impossible d'initialiser GLFW")
     glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
@@ -638,30 +680,72 @@ def main():
     glfw.swap_interval(1)
 
     ctx = moderngl.create_context()
-    scene = Scene(ctx)
-    drone = Drone(scene, position=(-2.7, 1.4, 2.0), yaw=-90.0)
+    scene = Scene(ctx, maze_seed=args.seed)
+    scene.building_mode = start_mode
+    spawn_pos, spawn_yaw = scene.spawn(start_mode)
+    drone = Drone(scene, position=spawn_pos, yaw=spawn_yaw)
     panel = SidePanel()
 
     # Paramètres de l'interface et du contrôle
     settings = {
         "max_speed": 8.0,          # vitesse max par défaut (m/s) -> ~29 km/h
+        "ctrl_kv": mujoco_flight.KV,   # gain proportionnel du contrôleur de vitesse (1/s)
+        "ctrl_ki": mujoco_flight.KI,   # gain intégral
+        "ctrl_tilt": math.degrees(mujoco_flight.TILT_MAX),  # inclinaison max (°), limite le freinage
         "yaw_sens": 1.0,           # sensibilité rotation lacet
         "cam_sens": 1.0,           # sensibilité caméra
         "gamepad_enabled": True,
         "gamepad_connected": False,
         "gamepad_name": "",
         "show_grid": True,         # sol requadrillé par défaut
-        "building_mode": 0,        # 0: Procédural (vol intérieur), 2: Aucun
+        "building_mode": start_mode,  # ENV_BUILDING, ENV_WALLS ou ENV_EMPTY
         "teleport": None,          # tuple (pos, yaw) si téléportation demandée
+        "maze_seed": args.seed,
+        "regen_maze": False,       # bouton « Nouveaux murs »
+        "maze_spawn": scene.wall_maze.spawn,
+        "maze_info": [],
+        "regen_forest": False,     # bouton « Nouvelle forêt »
+        "forest_density": FOREST_DENSITY_DEFAULT * 100.0,  # arbres / 100 m²
+        "regen_forest_density": False,
+        "forest_spawn": None,
+        "forest_info": [],
+        "cams_on_chassis": drone.cams_on_chassis,  # False : caméras stabilisées
     }
+    last_mode = start_mode
 
     # [libellé, actif, caméra] : l'ordre est celui d'affichage, de gauche à droite.
+    world_cam = LookAtCamera(*scene.overview_camera(start_mode))
     views = [
         ["Caméra 1 (gauche)", True, drone.cameras[0]],
         ["Caméra 2 (droite)", True, drone.cameras[1]],
-        ["Caméra fixe (monde)", True, LookAtCamera(WORLD_CAMERA_POSITION, WORLD_CAMERA_TARGET)],
+        ["Caméra fixe (monde)", True, world_cam],
         ["Caméra de suivi", False, ChaseCamera(drone)],
     ]
+
+    def update_env_info():
+        maze = scene.wall_maze
+        counts = maze.summary()
+        settings["maze_spawn"] = maze.spawn
+        settings["maze_info"] = [
+            f"Graine : {maze.seed}",
+            f"{maze.n_walls} murs, {len(maze.openings)} ouvertures",
+            f"{counts['passage']} passages, {counts['cul_de_sac']} culs-de-sac",
+            f"{counts['trop_petit']} trop petites",
+        ]
+
+    def update_forest_info():
+        forest = scene.forest
+        if forest is None:
+            return
+        counts = forest.summary()
+        settings["forest_spawn"] = forest.spawn
+        settings["forest_info"] = [
+            f"Graine : {forest.seed}",
+            f"{counts['arbre']} pins",
+        ]
+
+    update_env_info()
+    update_forest_info()
 
     state = {"captured": False, "last": None, "mouse_yaw_delta": 0.0}
 
@@ -727,6 +811,10 @@ def main():
         base_h = float(settings.get("max_speed", 8.0))
         yaw_sens = float(settings.get("yaw_sens", 1.0))
         cam_sens = float(settings.get("cam_sens", 1.0))
+
+        drone.flight.kv = float(settings["ctrl_kv"])
+        drone.flight.ki = float(settings["ctrl_ki"])
+        drone.flight.tilt_max = math.radians(float(settings["ctrl_tilt"]))
 
         # Détermination des vitesses maximales
         boost = pressed(glfw.KEY_LEFT_SHIFT)
@@ -797,9 +885,37 @@ def main():
             drone.update_cameras()
             settings["teleport"] = None
 
-        # Synchronisation du mode de bâtiment sélectionné
+        # Synchronisation de l'environnement sélectionné
         b_mode = int(settings.get("building_mode", 0))
         scene.building_mode = b_mode
+        if settings.get("regen_maze"):
+            settings["regen_maze"] = False
+            settings["maze_seed"] = random.randrange(100000)
+            scene.regenerate_maze(settings["maze_seed"])
+            update_env_info()
+            last_mode = None  # force le retour au départ ci-dessous
+        if settings.get("regen_forest"):
+            settings["regen_forest"] = False
+            scene.regenerate_forest(random.randrange(100000), settings["forest_density"] / 100.0)
+            last_mode = None
+        if settings.get("regen_forest_density"):  # même graine, nouvelle densité
+            settings["regen_forest_density"] = False
+            scene.regenerate_forest(scene.forest_seed, settings["forest_density"] / 100.0)
+            update_forest_info()
+            last_mode = None
+        if b_mode != last_mode:
+            last_mode = b_mode
+            if b_mode == ENV_FOREST:
+                scene.ensure_forest()
+                update_forest_info()
+            world_cam.position, world_cam.target = (np.array(p, dtype="f4") for p in scene.overview_camera(b_mode))
+            t_pos, t_yaw = scene.spawn(b_mode)
+            drone.position = np.array(t_pos, dtype="f8")
+            drone.velocity = np.zeros(3, dtype="f8")
+            drone.yaw, drone.pitch, drone.roll = float(t_yaw), 0.0, 0.0
+            drone.update_cameras()
+
+        drone.cams_on_chassis = bool(settings["cams_on_chassis"])
 
         # Vecteur de consigne de vitesse [m/s]
         v_cmd = np.array([cmd_fwd * max_h, cmd_right * max_h, cmd_up * max_v])
@@ -820,12 +936,15 @@ def main():
             ctx.clear(0.12, 0.12, 0.12)
             panel_px = round(PANEL_WIDTH * w / max(ww, 1))
             active = [v for v in views if v[1]]
-            drone_items = drone.render_items()
+            target_items = scene.target_items()
+            drone_items = drone.render_items() + target_items
             tiles = tile_viewports(panel_px, w - panel_px, h, len(active))
             for (_, _, cam), vp in zip(active, tiles):
                 ctx.viewport = vp
                 ctx.clear(0.55, 0.7, 0.9, viewport=vp)
-                scene.render(cam, vp[2] / vp[3], extra=drone_items, building_mode=b_mode)
+                # Le drone n'apparaît pas dans ses propres caméras (elles sont dans sa coque)
+                extra = target_items if cam in drone.cameras else drone_items
+                scene.render(cam, vp[2] / vp[3], extra=extra, building_mode=b_mode)
             # traits de séparation entre les vues
             ctx.viewport = (0, 0, w, h)
             for vp in tiles[1:]:
@@ -843,6 +962,11 @@ def main():
                 f"Cam. inc.: {drone.camera_pitch:5.1f} deg",
                 f"Base st. : {STEREO_BASELINE * 100:.0f} cm",
                 "Contact  : OUI" if drone.contact else "Contact  : non",
+            ]
+            if scene.target() is not None:
+                d_target = float(np.linalg.norm(scene.target() - drone.position))
+                info.append(f"Cible    : {d_target:5.1f} m")
+            info += [
                 "",
                 "Clic vue : capturer souris",
                 "Échap    : libérer souris",
